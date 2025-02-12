@@ -1,0 +1,159 @@
+from flask import Flask, request, jsonify
+import openai
+import requests
+import matplotlib.pyplot as plt
+import io
+import base64
+from datetime import datetime, timedelta
+import threading
+
+app = Flask(__name__)
+
+# Set OpenAI API Key
+openai.api_key = "YOUR_OPENAI_API_KEY"
+
+# Panchang API Configuration
+PANCHANG_API_URL = "https://api.example.com/panchang"
+PANCHANG_API_KEY = "YOUR_PANCHANG_API_KEY"
+
+# Ephemeris API Configuration for sunrise time, planetary positions, and divisional charts
+EPHEMERIS_API_URL = "https://api.example.com/ephemeris"
+EPHEMERIS_API_KEY = "YOUR_EPHEMERIS_API_KEY"
+
+# Storage for tracking remedies progress
+remedy_tracking_db = {}
+reminder_schedule = {}
+
+# Function to get planetary transits
+def get_planetary_transits(period="monthly"):
+    params = {"api_key": EPHEMERIS_API_KEY, "period": period}
+    response = requests.get(f"{EPHEMERIS_API_URL}/transits", params=params)
+    if response.status_code == 200:
+        return response.json().get("planetary_transits", {})
+    return {"error": "Unable to fetch planetary transits"}
+
+# Function to track remedy progress
+def track_remedy_progress(user_id, remedy, progress):
+    if user_id not in remedy_tracking_db:
+        remedy_tracking_db[user_id] = {}
+    remedy_tracking_db[user_id][remedy] = progress
+    return {"message": "Remedy progress updated successfully", "data": remedy_tracking_db[user_id]}
+
+# Function to get remedy progress
+def get_remedy_progress(user_id):
+    return remedy_tracking_db.get(user_id, {})
+
+# Function to generate remedy progress visualization
+def generate_remedy_progress_chart(user_id):
+    user_progress = remedy_tracking_db.get(user_id, {})
+    if not user_progress:
+        return None
+    
+    remedies = list(user_progress.keys())
+    progress_values = list(user_progress.values())
+    
+    plt.figure(figsize=(8, 4))
+    plt.barh(remedies, progress_values, color='green')
+    plt.xlabel('Progress (%)')
+    plt.ylabel('Remedies')
+    plt.title(f'Remedy Progress for User {user_id}')
+    
+    img = io.BytesIO()
+    plt.savefig(img, format='png')
+    img.seek(0)
+    encoded_chart = base64.b64encode(img.getvalue()).decode('utf-8')
+    return encoded_chart
+
+# Function to send remedy reminder notifications
+def send_reminder(user_id):
+    user_reminders = reminder_schedule.get(user_id, [])
+    return {"user_id": user_id, "reminders": user_reminders}
+
+# Function to schedule remedy reminders
+def schedule_reminder(user_id, remedy, reminder_time):
+    if user_id not in reminder_schedule:
+        reminder_schedule[user_id] = []
+    reminder_schedule[user_id].append({"remedy": remedy, "reminder_time": reminder_time})
+    threading.Timer((reminder_time - datetime.now()).total_seconds(), send_reminder, args=[user_id]).start()
+    return {"message": "Reminder scheduled successfully", "user_id": user_id, "remedy": remedy}
+
+# Function to get transit-based remedies
+def get_transit_based_remedies(birth_date, birth_time, birth_place, planetary_positions, planetary_transits):
+    formatted_prompt = f"""
+    You are an expert Vedic astrologer. Based on the user's birth chart and current planetary transits, suggest remedial measures to mitigate negative influences and enhance positive outcomes.
+    Date of Birth: {birth_date}
+    Time of Birth: {birth_time}
+    Place of Birth: {birth_place}
+    Natal Planetary Positions: {planetary_positions}
+    Current Transits: {planetary_transits}
+    Suggest practical remedies such as:
+    - Gemstones
+    - Mantras and Chants
+    - Fasting recommendations
+    - Charity and Donations
+    - Rituals and Puja
+    Provide specific and customized remedies according to Vedic astrology principles.
+    """
+    
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "system", "content": formatted_prompt}]
+    )
+    return response["choices"][0]["message"]["content"].strip()
+
+@app.route('/astrology', methods=['POST'])
+def astrology_api():
+    data = request.json
+    birth_date = data.get('birth_date')
+    birth_time = data.get('birth_time')
+    birth_place = data.get('birth_place')
+    query = data.get('query')
+    user_id = data.get('user_id')
+    
+    if not all([birth_date, birth_time, birth_place, query, user_id]):
+        return jsonify({"error": "Missing required parameters"}), 400
+    
+    planetary_positions = get_planetary_positions(birth_date, birth_place)
+    planetary_transits = get_planetary_transits()
+    transit_remedies = get_transit_based_remedies(birth_date, birth_time, birth_place, planetary_positions, planetary_transits)
+    remedy_progress = get_remedy_progress(user_id)
+    remedy_chart = generate_remedy_progress_chart(user_id)
+    
+    response_data = {
+        "planetary_positions": planetary_positions,
+        "planetary_transits": planetary_transits,
+        "transit_remedies": transit_remedies,
+        "remedy_progress": remedy_progress,
+        "remedy_chart": remedy_chart
+    }
+    return jsonify(response_data)
+
+@app.route('/update_remedy_progress', methods=['POST'])
+def update_remedy_progress():
+    data = request.json
+    user_id = data.get('user_id')
+    remedy = data.get('remedy')
+    progress = data.get('progress')
+    
+    if not all([user_id, remedy, progress]):
+        return jsonify({"error": "Missing required parameters"}), 400
+    
+    update_status = track_remedy_progress(user_id, remedy, progress)
+    return jsonify(update_status)
+
+@app.route('/schedule_reminder', methods=['POST'])
+def schedule_remedy_reminder():
+    data = request.json
+    user_id = data.get('user_id')
+    remedy = data.get('remedy')
+    reminder_time = data.get('reminder_time')
+    
+    if not all([user_id, remedy, reminder_time]):
+        return jsonify({"error": "Missing required parameters"}), 400
+    
+    reminder_time = datetime.strptime(reminder_time, "%Y-%m-%d %H:%M:%S")
+    schedule_status = schedule_reminder(user_id, remedy, reminder_time)
+    return jsonify(schedule_status)
+
+if __name__ == '__main__':
+    app.run(debug=True)
